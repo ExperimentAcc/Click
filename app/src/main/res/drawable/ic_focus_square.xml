@@ -1,0 +1,13 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="74dp"
+    android:height="74dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Yellow iOS-style focus brackets -->
+    <path
+        android:strokeColor="#FFFFD60A"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M4.5,9.5 V4.5 H9.5 M19.5,9.5 V4.5 H14.5 M4.5,14.5 V19.5 H9.5 M19.5,14.5 V19.5 H14.5" />
+</vector>

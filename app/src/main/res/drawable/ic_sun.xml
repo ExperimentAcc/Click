@@ -1,0 +1,17 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="38dp"
+    android:height="38dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <!-- Sun disc -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,7.6 A4.4,4.4 0 1,0 12.01,7.6 Z" />
+    <!-- Rays -->
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:pathData="M12,1.6 V3.8 M12,20.2 V22.4 M1.6,12 H3.8 M20.2,12 H22.4 M4.4,4.4 L6.1,6.1 M17.9,17.9 L19.6,19.6 M19.6,4.4 L17.9,6.1 M6.1,17.9 L4.4,19.6" />
+</vector>
