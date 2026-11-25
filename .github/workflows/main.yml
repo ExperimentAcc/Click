@@ -1,0 +1,41 @@
+name: Unzip Click.zip
+
+on:
+  workflow_dispatch: # Allows manual triggering from the Actions tab
+
+permissions:
+  contents: write # Required to push extracted files back to the repo
+
+jobs:
+  extract-and-commit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract contents of Click folder
+        run: |
+          # Unzip to a temporary directory
+          unzip -q Click.zip -d temp_extract
+          
+          # Move all files and folders (including hidden ones) from Click/ to repo root
+          shopt -s dotglob
+          mv temp_extract/Click/* .
+          
+          # Clean up the temporary folder
+          rm -rf temp_extract
+
+      - name: Commit and push extracted files
+        run: |
+          git config --local user.email "github-actions[bot]@://github.com"
+          git config --local user.name "github-actions[bot]"
+          git add .
+          
+          # Only commit if there are new or modified files
+          if ! git diff --staged --quiet; then
+            git commit -m "Extract files from Click.zip"
+            git push
+          else
+            echo "No changes to commit."
+          fi
