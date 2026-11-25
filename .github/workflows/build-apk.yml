@@ -1,17 +1,6 @@
 name: Build APK
 
-# Builds the Click release APK and uploads it as a workflow artifact.
-#
-# Triggers:
-#   - push / pull_request to main or master
-#   - manual run from the Actions tab (workflow_dispatch)
-#
-# Requires the Gradle wrapper (gradlew, gradle/wrapper/*) to be committed —
-# it already ships inside this project.
-
 on:
-  push:
-    branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -23,7 +12,6 @@ jobs:
     permissions:
       contents: read
 
-    # Cancel superseded runs on the same ref.
     concurrency:
       group: click-apk-${{ github.ref }}
       cancel-in-progress: true
@@ -40,11 +28,9 @@ jobs:
           cache: gradle
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Build release APK
-        # Release build: R8 minification + resource shrinking enabled
-        # (isMinifyEnabled / isShrinkResources) for the 3–5 MB APK.
         run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
 
       - name: Show APK size
