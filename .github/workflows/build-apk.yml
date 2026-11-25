@@ -1,0 +1,59 @@
+name: Build APK
+
+# Builds the Click release APK and uploads it as a workflow artifact.
+#
+# Triggers:
+#   - push / pull_request to main or master
+#   - manual run from the Actions tab (workflow_dispatch)
+#
+# Requires the Gradle wrapper (gradlew, gradle/wrapper/*) to be committed —
+# it already ships inside this project.
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    name: Build release APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    # Cancel superseded runs on the same ref.
+    concurrency:
+      group: click-apk-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build release APK
+        # Release build: R8 minification + resource shrinking enabled
+        # (isMinifyEnabled / isShrinkResources) for the 3–5 MB APK.
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Show APK size
+        run: ls -lh app/build/outputs/apk/release/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: click-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
