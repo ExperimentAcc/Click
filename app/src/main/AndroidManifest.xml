@@ -35,11 +35,17 @@
             strictly to the Activity lifecycle via CameraX bindToLifecycle(), so
             sensor + buffers release immediately when the app is minimized or closed.
         -->
-        <activity
+       <activity
             android:name=".MainActivity"
             android:exported="true"
             android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustNothing">
+
+            <!-- ADD THIS BLOCK SO THE ICON SHOWS ON YOUR HOME SCREEN -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
 
             <intent-filter>
                 <action android:name="android.media.action.IMAGE_CAPTURE" />
@@ -51,6 +57,9 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+            
+        
 
         <!--
             Strip library-injected background components so the final merged
