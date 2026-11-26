@@ -51,15 +51,10 @@ Requirements: **JDK 17**, Android Studio Koala+ (or Gradle 8.7).
 
 Or simply **File → Open** the project root in Android Studio and Run / Build.
 
-> **Signing:** the project ships a demo release keystore
-> (`app/keystore/click-release.jks`, alias `click`, password `click123`), wired in
-> via a `signingConfig` in `app/build.gradle.kts` — so `assembleRelease` produces a
-> **signed, directly installable** `app-release.apk` (R8-minified, ~1.1 MB).
->
-> For a real release, generate your own keystore and replace the credentials in
-> `signingConfigs.create("release")` — never ship production keys or reuse these
-> demo credentials:
-> `keytool -genkeypair -keystore my-release.jks -alias myapp -keyalg RSA -keysize 2048 -validity 10000`
+> **Signing:** no keystore is stored in this repo. `assembleRelease` signs the APK only
+> when the `KEYSTORE_PATH`, `KEYSTORE_PASSWORD`, `KEY_ALIAS` and `KEY_PASSWORD`
+> environment variables are set; otherwise the release APK is unsigned. Use
+> `assembleDebug` for quick on-device testing. See *Releasing* below.
 
 ## CI — GitHub Actions
 
@@ -115,3 +110,23 @@ app/src/main/res/
   front video is mirrored through `VideoCapture.Builder.setMirrorMode()`.
 - If a device exposes no frame-rate ranges, VideoCapture gracefully falls back
   to FHD/30.
+
+## Install
+
+1. Open the [Releases](../../releases) page and download the latest `Click-vX.Y.Z.apk`.
+2. Open the file on your phone and allow *Install unknown apps* for your browser/file manager when asked.
+3. Optional: set Click as the default camera in *Settings → Apps → Default apps → Camera app*.
+
+Each release also ships a `.sha256` file so you can check the download is intact.
+
+## Releasing (maintainers)
+
+Releases are signed by GitHub Actions using secrets, so no key is ever stored in the repo.
+
+1. Bump `versionCode` (must always go up) and `versionName` in `app/build.gradle.kts`.
+2. Commit, then push a tag: `git tag v1.2.0 && git push origin v1.2.0`.
+3. The **Release APK** workflow builds, signs and attaches the APK to a new GitHub Release.
+
+Required repository secrets: `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`.
+
+Local builds without those variables produce an *unsigned* release APK; use `./gradlew :app:assembleDebug` to test on a device.

@@ -15,21 +15,24 @@ android {
         versionName = "1.1.0"
     }
 
-    // Signing: the project ships a demo keystore so `assembleRelease` produces a
-    // directly installable APK out of the box. For a real release, generate your
-    // own keystore and replace these credentials — never ship production keys.
+    // Signing: credentials come from environment variables, never from the repo.
+    // Without them (local builds, pull requests) the release APK is simply left
+    // unsigned. See the "Releasing" section of the README.
+    val keystorePath: String? = System.getenv("KEYSTORE_PATH")
     signingConfigs {
-        create("release") {
-            keyAlias = "click"
-            keyPassword = "click123"
-            storeFile = file("keystore/click-release.jks")
-            storePassword = "click123"
+        if (keystorePath != null) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEY_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+            }
         }
     }
 
     buildTypes {
         release {
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.findByName("release")
             // Ultra-lightweight release build: R8 minification + resource shrinking.
             isMinifyEnabled = true
             isShrinkResources = true
