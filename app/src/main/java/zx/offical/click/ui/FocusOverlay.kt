@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
+import android.util.AttributeSet
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -27,7 +28,8 @@ import zx.offical.click.util.Ui
  * - Pinch-to-zoom (ScaleGestureDetector) is hosted here so it works across the
  *   whole viewfinder area in both photo and video modes.
  */
-class FocusOverlay(context: Context) : FrameLayout(context) {
+class FocusOverlay(context: Context, attrs: AttributeSet? = null) :
+    FrameLayout(context, attrs) {
 
     /** Exposure compensation range reported by the camera (may be empty if unsupported). */
     var exposureRange: IntRange = 0..0

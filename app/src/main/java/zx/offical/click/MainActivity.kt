@@ -106,6 +106,7 @@ class MainActivity : android.app.Activity(), LifecycleOwner {
 
     // ------------------------------------------------------------------ CameraX
     private lateinit var cameraProvider: ProcessCameraProvider
+    private var cameraStarting = false
     private var cameraInfo: CameraInfo? = null
     private var cameraControl: CameraControl? = null
 
@@ -136,29 +137,33 @@ class MainActivity : android.app.Activity(), LifecycleOwner {
     private var selectedVideoOption = 0
     private var lastMediaUri: Uri? = null
 
-    private val mainExecutor = ContextCompat.getMainExecutor(this)
+    // Anything needing a Context must be lazy: field initializers run before the
+    // Activity is attached to one.
+    private val uiExecutor by lazy { ContextCompat.getMainExecutor(this) }
     private val handler = Handler(Looper.getMainLooper())
 
     // ------------------------------------------------------- Pinch-to-zoom
     private var startZoom = 1.0f
-    private val scaleDetector = ScaleGestureDetector(
-        this,
-        object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-            override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
-                startZoom = currentZoom
-                return true
-            }
+    private val scaleDetector: ScaleGestureDetector by lazy {
+        ScaleGestureDetector(
+            this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                    startZoom = currentZoom
+                    return true
+                }
 
-            override fun onScale(detector: ScaleGestureDetector): Boolean {
-                val target = (startZoom * detector.scaleFactor)
-                    .coerceIn(zoomRange.start, zoomRange.endInclusive)
-                cameraControl?.setZoomRatio(target)
-                currentZoom = target
-                updateZoomPills()
-                return true
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    val target = (startZoom * detector.scaleFactor)
+                        .coerceIn(zoomRange.start, zoomRange.endInclusive)
+                    cameraControl?.setZoomRatio(target)
+                    currentZoom = target
+                    updateZoomPills()
+                    return true
+                }
             }
-        }
-    )
+        )
+    }
 
     // ----------------------------------------------------------------- Views
     private lateinit var previewView: PreviewView
@@ -242,9 +247,6 @@ class MainActivity : android.app.Activity(), LifecycleOwner {
     override fun onDestroy() {
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
         handler.removeCallbacksAndMessages(null)
-        if (::cameraProvider.isInitialized) {
-            cameraProvider.shutdown()
-        }
         super.onDestroy()
     }
 
@@ -342,20 +344,40 @@ class MainActivity : android.app.Activity(), LifecycleOwner {
     }
 
     private fun initCamera() {
-        val providerFuture = ProcessCameraProvider.getInstance(this)
-        providerFuture.addListener(
-            {
-                cameraProvider = providerFuture.get()
-                bindCamera()
-            },
-            mainExecutor
-        )
+        // onCreate and onResume can both get here before the provider is ready.
+        if (cameraStarting) return
+        cameraStarting = true
+
+        try {
+            val providerFuture = ProcessCameraProvider.getInstance(this)
+            providerFuture.addListener(
+                {
+                    if (isDestroyed) return@addListener
+                    try {
+                        cameraProvider = providerFuture.get()
+                        bindCamera()
+                    } catch (e: Exception) {
+                        onCameraStartFailed(e)
+                    }
+                },
+                uiExecutor
+            )
+        } catch (e: Exception) {
+            onCameraStartFailed(e)
+        }
+    }
+
+    private fun onCameraStartFailed(e: Exception) {
+        Log.e(TAG, "Camera startup failed", e)
+        cameraStarting = false
+        toast("Camera could not be started")
     }
 
     // ------------------------------------------------------------- Camera bind
     @SuppressLint("MissingPermission")
     private fun bindCamera() {
-        if (!hasCameraPermission()) return
+        // Mode, aspect and flip taps can arrive before the provider is ready.
+        if (!::cameraProvider.isInitialized || !hasCameraPermission()) return
 
         val selector = CameraSelector.Builder()
             .requireLensFacing(lensFacing)
@@ -659,6 +681,7 @@ class MainActivity : android.app.Activity(), LifecycleOwner {
 
     // ------------------------------------------------------------- Photo capture
     private fun takePhoto() {
+        if (cameraControl == null) return
         Ui.confirm(shutterBtn)
         // Bright white screen-flash for front-camera selfies.
         if (lensFacing == CameraSelector.LENS_FACING_FRONT && flashState == FLASH_ON) {
@@ -677,7 +700,7 @@ class MainActivity : android.app.Activity(), LifecycleOwner {
 
         imageCapture.takePicture(
             options,
-            mainExecutor,
+            uiExecutor,
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(result: ImageCapture.OutputFileResults) {
                     onMediaSaved(result.savedUri)
@@ -698,7 +721,7 @@ class MainActivity : android.app.Activity(), LifecycleOwner {
     }
 
     private fun startRecording() {
-        if (mode != MODE_VIDEO) return
+        if (mode != MODE_VIDEO || cameraControl == null) return
         Ui.confirm(shutterBtn)
 
         val values = ContentValues().apply {
@@ -713,7 +736,7 @@ class MainActivity : android.app.Activity(), LifecycleOwner {
             .build()
 
         val pending = recorder.prepareRecording(this, options)
-        activeRecording = pending.start(mainExecutor) { event ->
+        activeRecording = pending.start(uiExecutor) { event ->
             if (event is VideoRecordEvent.Finalize) {
                 if (event.hasError()) {
                     Log.e(TAG, "Recording failed with code ${event.outputResults}")
