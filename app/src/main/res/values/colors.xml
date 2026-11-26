@@ -1,11 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- iPhone-style palette -->
     <color name="click_black">#FF000000</color>
-    <color name="click_yellow">#FFFFD60A</color>
-    <color name="click_white">#FFFFFFFF</color>
-    <color name="click_dim">#FF8E8E93</color>
-    <color name="click_red">#FFE53935</color>
-    <color name="click_surface">#FF1C1C1E</color>
     <color name="launcher_bg">#FF0A0A0A</color>
 </resources>

@@ -1,222 +1,127 @@
 package zx.offical.click
 
-import android.animation.ObjectAnimator
-import android.animation.ValueAnimator
+import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Intent
-import android.content.ContentValues
-import android.content.pm.PackageManager
+import android.content.SharedPreferences
 import android.content.res.ColorStateList
 import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
-import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CaptureRequest
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Log
-import android.util.Range
-import android.view.ScaleGestureDetector
+import android.view.KeyEvent
+import android.view.OrientationEventListener
+import android.view.Surface
 import android.view.View
-import android.view.ViewGroup
-import android.view.animation.DecelerateInterpolator
-import android.widget.FrameLayout
-import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.PopupWindow
-import android.widget.SeekBar
-import android.widget.TextView
+import android.view.WindowManager
 import android.widget.Toast
-import androidx.camera.core.AspectRatio
-import androidx.camera.core.CameraControl
-import androidx.camera.core.CameraInfo
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ExposureState
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
-import androidx.camera.core.MirrorMode
-import androidx.camera.core.Preview
-import androidx.camera.core.UseCase
-import androidx.camera.core.ZoomState
-import androidx.camera.camera2.interop.Camera2CameraControl
-import androidx.camera.camera2.interop.Camera2CameraInfo
-import androidx.camera.camera2.interop.CaptureRequestOptions
-import androidx.camera.camera2.interop.ExperimentalCamera2Interop
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.FileDescriptorOutputOptions
 import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.Quality
-import androidx.camera.video.QualitySelector
-import androidx.camera.video.Recorder
 import androidx.camera.video.Recording
-import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
-import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
-import androidx.core.content.ContextCompat
+import androidx.lifecycle.Observer
+import java.io.OutputStream
 import java.util.Locale
-import kotlin.math.abs
-import zx.offical.click.ui.FocusOverlay
-import zx.offical.click.ui.ModeScroller
+import java.util.concurrent.Executors
+import zx.offical.click.camera.Aspect
+import zx.offical.click.camera.CameraConfig
+import zx.offical.click.camera.CameraEngine
+import zx.offical.click.media.MediaRepo
+import zx.offical.click.ui.CameraScreen
+import zx.offical.click.ui.Setting
 import zx.offical.click.ui.ShutterButton
-import zx.offical.click.util.ThumbnailLoader
 import zx.offical.click.util.Ui
 
 /**
- * Click — fast, iPhone-inspired camera.
- *
- * Architecture notes:
- * - Camera is bound strictly to the Activity lifecycle (bindToLifecycle), so the
- *   sensor and buffers release the moment the app is minimized/closed. There are
- *   no services or receivers anywhere in the app.
- * - Photo capture uses CAPTURE_MODE_MINIMIZE_LATENCY for zero shutter lag.
- * - Flash: ImageCapture.FLASH_MODE_* for photos (front-camera selfies get the
- *   bright white screen-flash via the overlay); torch for video.
- * - Tap-to-focus + exposure compensation via CameraControl.
- * - Manual ISO via Camera2Interop (Camera2CameraControl + SENSOR_SENSITIVITY).
- * - Zoom pills + pinch via CameraControl.setZoomRatio() in photo AND video.
- * - All media is saved straight to MediaStore (DCIM/Camera) so the Album picks
- *   it up instantly.
+ * Click: a plain Activity that connects [CameraScreen] to [CameraEngine].
+ * There are no services or receivers; CameraX releases the camera on stop.
  */
-class MainActivity : android.app.Activity(), LifecycleOwner {
+class MainActivity : Activity(), LifecycleOwner {
 
-    /**
-     * Click is a plain Activity (no Fragment, no AppCompat), so CameraX needs a
-     * manual LifecycleOwner: a LifecycleRegistry fed from the real Activity
-     * lifecycle events lets bindToLifecycle() and LiveData.observe() work.
-     */
     private val lifecycleRegistry = LifecycleRegistry(this)
     override val lifecycle: Lifecycle get() = lifecycleRegistry
 
-    companion object {
-        private const val TAG = "Click"
-        private const val REQ_PERMISSIONS = 1001
-        private const val MODE_PHOTO = 0
-        private const val MODE_VIDEO = 1
-        private const val FLASH_OFF = 0
-        private const val FLASH_ON = 1
-        private const val FLASH_AUTO = 2
-    }
+    private lateinit var screen: CameraScreen
+    private lateinit var engine: CameraEngine
+    private lateinit var prefs: SharedPreferences
+    private lateinit var orientation: OrientationEventListener
 
-    // ------------------------------------------------------------------ CameraX
-    private lateinit var cameraProvider: ProcessCameraProvider
-    private var cameraStarting = false
-    private var cameraInfo: CameraInfo? = null
-    private var cameraControl: CameraControl? = null
-
-    private lateinit var preview: Preview
-    private lateinit var imageCapture: ImageCapture
-    private lateinit var videoCapture: VideoCapture<Recorder>
-    private lateinit var recorder: Recorder
-
-    private var videoQuality: Quality = Quality.FHD
-    private var videoFps = 30
-    private var activeRecording: Recording? = null
-
-    // -------------------------------------------------------------------- State
-    private var mode = MODE_PHOTO
-    private var lensFacing = CameraSelector.LENS_FACING_BACK
-    private var flashState = FLASH_OFF
-    private var aspectNum = 4
-    private var aspectDen = 3
-    private var isRecording = false
-    private var currentZoom = 1.0f
-    private var zoomRange = 1.0f..4.0f
-    private var exposureRange = 0..0
-    private var manualIso = false
-    private var isoValue = 0
-    private var isoMin = 100
-    private var isoMax = 3200
-    private var proDrawerOpen = false
-    private var selectedVideoOption = 0
-    private var lastMediaUri: Uri? = null
-
-    // Anything needing a Context must be lazy: field initializers run before the
-    // Activity is attached to one.
-    private val uiExecutor by lazy { ContextCompat.getMainExecutor(this) }
     private val handler = Handler(Looper.getMainLooper())
+    private val io = Executors.newSingleThreadExecutor()
+    // Context-dependent values must stay lazy: no Context exists during construction.
+    private val ui by lazy { ContextCompat.getMainExecutor(this) }
 
-    // ------------------------------------------------------- Pinch-to-zoom
-    private var startZoom = 1.0f
-    private val scaleDetector: ScaleGestureDetector by lazy {
-        ScaleGestureDetector(
-            this,
-            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-                override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
-                    startZoom = currentZoom
-                    return true
-                }
+    // Session state
+    private var video = false
+    private var front = false
+    private var photoFlash = ImageCapture.FLASH_MODE_OFF
+    private var torch = false
+    private var iso: Int? = null
+    private var zoom = 1f
+    private var capturing = false
+    private var recording: Recording? = null
+    private var countdownLeft = 0
+    private var lastMedia: Uri? = null
+    private var askedMicrophone = false
 
-                override fun onScale(detector: ScaleGestureDetector): Boolean {
-                    val target = (startZoom * detector.scaleFactor)
-                        .coerceIn(zoomRange.start, zoomRange.endInclusive)
-                    cameraControl?.setZoomRatio(target)
-                    currentZoom = target
-                    updateZoomPills()
-                    return true
-                }
-            }
-        )
-    }
+    // Saved preferences
+    private var aspect = Aspect.FOUR_THREE
+    private var quality: Quality = Quality.FHD
+    private var fps = 30
+    private var timerSeconds = 0
+    private var grid = false
+    private var mirrorSelfie = true
+    private var fastShutter = false
 
-    // ----------------------------------------------------------------- Views
-    private lateinit var previewView: PreviewView
-    private lateinit var focusOverlay: FocusOverlay
-    private lateinit var shutterFlash: View
-    private lateinit var flashScreen: View
+    // Set when another app asked us for a photo or video.
+    private var imageRequest = false
+    private var videoRequest = false
 
-    private lateinit var flashPill: LinearLayout
-    private lateinit var flashIcon: ImageView
-    private lateinit var flashLabel: TextView
-    private lateinit var aspectPill: LinearLayout
-    private lateinit var aspectIcon: ImageView
-    private lateinit var aspectLabel: TextView
-    private lateinit var proPill: LinearLayout
-    private lateinit var proIcon: ImageView
-    private lateinit var resBadge: TextView
-    private lateinit var recIndicator: LinearLayout
-    private lateinit var recTimer: TextView
+    // ---------------------------------------------------------------- Lifecycle
 
-    private lateinit var modeScroller: ModeScroller
-    private lateinit var shutterBtn: ShutterButton
-    private lateinit var flipBtn: ImageView
-    private lateinit var thumbView: ImageView
-    private lateinit var zoom1x: TextView
-    private lateinit var zoom2x: TextView
-    private lateinit var zoom4x: TextView
-
-    private lateinit var proDrawer: LinearLayout
-    private lateinit var isoSeekBar: SeekBar
-    private lateinit var isoLabel: TextView
-    private lateinit var autoIsoBtn: TextView
-
-    private val videoOptions = mutableListOf<VideoOption>()
-    private var resPopup: PopupWindow? = null
-
-    private data class VideoOption(val label: String, val quality: Quality, val fps: Int)
-
-    // --------------------------------------------------------------- Lifecycle
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
-        requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
-        setContentView(R.layout.activity_main)
+        goEdgeToEdge()
 
-        bindViews()
-        setupUi()
+        imageRequest = intent?.action == MediaStore.ACTION_IMAGE_CAPTURE
+        videoRequest = intent?.action == MediaStore.ACTION_VIDEO_CAPTURE
+        video = videoRequest
+        prefs = getSharedPreferences("click", MODE_PRIVATE)
+        loadPreferences()
 
-        if (hasCameraPermission()) {
-            initCamera()
-        } else {
-            ActivityCompat.requestPermissions(
-                this, arrayOf(android.Manifest.permission.CAMERA), REQ_PERMISSIONS
-            )
+        screen = CameraScreen(this)
+        setContentView(screen)
+        engine = CameraEngine(this, this, screen.previewView) { min, max, current ->
+            zoom = current
+            screen.zoomBar.update(min, max, current)
+        }
+        wireUi()
+        if (!MediaRepo.hasCamera(this)) {
+            screen.showPermissionMessage("Click needs camera access to take photos.")
+        }
+
+        orientation = object : OrientationEventListener(this) {
+            override fun onOrientationChanged(degrees: Int) = onRotated(degrees)
+        }
+
+        val missing = MediaRepo.missing(this)
+        if (savedInstanceState == null && missing.isNotEmpty()) {
+            requestPermissions(missing.toTypedArray(), REQUEST_LAUNCH)
         }
     }
 
@@ -228,25 +133,30 @@ class MainActivity : android.app.Activity(), LifecycleOwner {
     override fun onResume() {
         super.onResume()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
-        // Re-establish the camera if permission was granted while the app was paused.
-        if (!::cameraProvider.isInitialized && hasCameraPermission()) {
-            initCamera()
-        }
+        if (orientation.canDetectOrientation()) orientation.enable()
+        if (MediaRepo.hasCamera(this)) startCamera()
+        refreshThumbnail()
     }
 
     override fun onPause() {
+        orientation.disable()
+        cancelCountdown()
+        stopRecording()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
         super.onPause()
     }
 
     override fun onStop() {
+        torch = false
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+        updateFlashButton()
         super.onStop()
     }
 
     override fun onDestroy() {
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
         handler.removeCallbacksAndMessages(null)
+        io.shutdown()
         super.onDestroy()
     }
 
@@ -256,766 +166,679 @@ class MainActivity : android.app.Activity(), LifecycleOwner {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQ_PERMISSIONS) {
-            if (grantResults.isNotEmpty() &&
-                grantResults[0] == PackageManager.PERMISSION_GRANTED
-            ) {
-                initCamera()
+        // An empty result means the dialog was interrupted, not answered.
+        if (permissions.isEmpty()) return
+        if (requestCode == REQUEST_LAUNCH) {
+            if (MediaRepo.hasCamera(this)) {
+                startCamera()
             } else {
-                toast("Camera permission is required")
-                finish()
+                screen.showPermissionMessage("Click needs camera access to take photos.")
             }
         }
+        if (requestCode == REQUEST_ALBUM && !MediaRepo.hasAlbumAccess(this)) {
+            toast("Allow photo access in Settings to see your album")
+        }
+        refreshThumbnail()
     }
 
-    // ----------------------------------------------------------------- Setup
-    private fun bindViews() {
-        previewView = findViewById(R.id.preview_view)
-        focusOverlay = findViewById(R.id.focus_overlay)
-        shutterFlash = findViewById(R.id.shutter_flash)
-        flashScreen = findViewById(R.id.flash_screen)
-
-        flashPill = findViewById(R.id.flash_pill)
-        flashIcon = findViewById(R.id.flash_icon)
-        flashLabel = findViewById(R.id.flash_label)
-        aspectPill = findViewById(R.id.aspect_pill)
-        aspectIcon = findViewById(R.id.aspect_icon)
-        aspectLabel = findViewById(R.id.aspect_label)
-        proPill = findViewById(R.id.pro_pill)
-        proIcon = findViewById(R.id.pro_icon)
-        resBadge = findViewById(R.id.res_badge)
-        recIndicator = findViewById(R.id.rec_indicator)
-        recTimer = findViewById(R.id.rec_timer)
-
-        modeScroller = findViewById(R.id.mode_scroller)
-        shutterBtn = findViewById(R.id.shutter_btn)
-        flipBtn = findViewById(R.id.flip_btn)
-        thumbView = findViewById(R.id.thumb_view)
-        zoom1x = findViewById(R.id.zoom_1x)
-        zoom2x = findViewById(R.id.zoom_2x)
-        zoom4x = findViewById(R.id.zoom_4x)
-
-        proDrawer = findViewById(R.id.pro_drawer)
-        isoSeekBar = findViewById(R.id.iso_seekbar)
-        isoLabel = findViewById(R.id.iso_label)
-        autoIsoBtn = findViewById(R.id.auto_iso_btn)
+    @Deprecated("Deprecated in Java")
+    @Suppress("DEPRECATION")
+    override fun onBackPressed() {
+        if (screen.sheet.isOpen) screen.sheet.close() else super.onBackPressed()
     }
 
-    private fun setupUi() {
-        previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
-        focusOverlay.scaleGesture = scaleDetector
-        focusOverlay.onExposureChanged = { index ->
-            cameraControl?.setExposureCompensationIndex(index)
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            if (event.repeatCount == 0 && !screen.sheet.isOpen) onShutter()
+            return true
         }
+        return super.onKeyDown(keyCode, event)
+    }
 
-        flashPill.setOnClickListener { Ui.tick(it); cycleFlash() }
-        aspectPill.setOnClickListener { Ui.tick(it); cycleAspect() }
-        proPill.setOnClickListener { Ui.tick(it); toggleProDrawer() }
-        resBadge.setOnClickListener { showResPopup() }
+    @Suppress("DEPRECATION")
+    private fun goEdgeToEdge() {
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+    }
 
-        modeScroller.onSelect = { video -> switchMode(video) }
+    // ------------------------------------------------------------------- Wiring
 
-        shutterBtn.setOnClickListener {
-            Ui.confirm(it)
-            if (mode == MODE_PHOTO) takePhoto() else toggleRecording()
+    private fun wireUi() {
+        screen.shutter.setOnClickListener { onShutter() }
+        screen.flipButton.setOnClickListener { flipCamera() }
+        screen.flashButton.setOnClickListener { cycleFlash() }
+        screen.settingsButton.setOnClickListener { openSettings() }
+        screen.videoBadge.setOnClickListener { openSettings() }
+        screen.thumbnail.setOnClickListener { openAlbum() }
+        screen.permissionButton.setOnClickListener {
+            startActivity(
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", packageName, null)
+                )
+            )
         }
-        flipBtn.setOnClickListener { flipCamera() }
-        thumbView.setOnClickListener { openLastMedia() }
-
-        zoom1x.setOnClickListener { setZoom(1.0f, it) }
-        zoom2x.setOnClickListener { setZoom(2.0f, it) }
-        zoom4x.setOnClickListener { setZoom(4.0f, it) }
-
-        autoIsoBtn.setOnClickListener { Ui.tick(it); resetManualIso() }
-        isoSeekBar.setOnSeekBarChangeListener(
-            object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
-                    if (fromUser) setManualIso(progress + isoMin)
-                }
-
-                override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) {}
+        screen.modeScroller.onSelect = { switchMode(it) }
+        screen.zoomBar.onPick = { engine.setZoom(it) }
+        screen.overlay.onSwipe = { switchMode(it) }
+        screen.overlay.onPinch = { engine.zoomBy(it) }
+        screen.overlay.onFocus = { x, y -> engine.focusAt(x, y) }
+        screen.overlay.onExposure = { engine.setExposure(it) }
+        screen.previewView.previewStreamState.observe(
+            this,
+            Observer<PreviewView.StreamState> {
+                if (it == PreviewView.StreamState.STREAMING) revealViewfinder()
             }
         )
 
-        updateZoomPills()
-        updateFlashPill()
-        updateAspectPill()
-    }
-
-    private fun initCamera() {
-        // onCreate and onResume can both get here before the provider is ready.
-        if (cameraStarting) return
-        cameraStarting = true
-
-        try {
-            val providerFuture = ProcessCameraProvider.getInstance(this)
-            providerFuture.addListener(
-                {
-                    if (isDestroyed) return@addListener
-                    try {
-                        cameraProvider = providerFuture.get()
-                        bindCamera()
-                    } catch (e: Exception) {
-                        onCameraStartFailed(e)
-                    }
-                },
-                uiExecutor
-            )
-        } catch (e: Exception) {
-            onCameraStartFailed(e)
+        screen.overlay.showGrid = grid
+        screen.modeScroller.setVideo(video)
+        if (imageRequest || videoRequest) {
+            screen.modeScroller.visibility = View.INVISIBLE
+            screen.thumbnail.visibility = View.INVISIBLE
         }
+        updateModeUi()
     }
 
-    private fun onCameraStartFailed(e: Exception) {
-        Log.e(TAG, "Camera startup failed", e)
-        cameraStarting = false
-        toast("Camera could not be started")
+    // ------------------------------------------------------------------- Camera
+
+    private fun startCamera() {
+        screen.showPermissionMessage(null)
+        if (engine.isReady) return
+        engine.start(
+            onReady = { if (!isDestroyed && !engine.isReady) rebind() },
+            onError = { toast("Camera could not be started") }
+        )
     }
 
-    // ------------------------------------------------------------- Camera bind
-    @SuppressLint("MissingPermission")
-    private fun bindCamera() {
-        // Mode, aspect and flip taps can arrive before the provider is ready.
-        if (!::cameraProvider.isInitialized || !hasCameraPermission()) return
+    private fun currentConfig() =
+        CameraConfig(video, front, aspect, quality, fps, mirrorSelfie, fastShutter)
 
-        val selector = CameraSelector.Builder()
-            .requireLensFacing(lensFacing)
-            .build()
+    private fun rebind() {
+        if (recording != null || !MediaRepo.hasCamera(this)) return
+        screen.cover.animate().cancel()
+        screen.cover.alpha = 1f
+        updateModeUi()
+        val wantedZoom = zoom
 
-        // NOTE: Preview.Builder.setMirrorMode() throws on CameraX 1.3.x, so front
-        // preview mirroring is done on the PreviewView itself (scaleX = -1).
-        preview = Preview.Builder()
-            .setTargetAspectRatio(aspectRatio())
-            .build()
-        previewView.scaleX = if (lensFacing == CameraSelector.LENS_FACING_FRONT) -1f else 1f
-
-        imageCapture = ImageCapture.Builder()
-            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-            .setTargetAspectRatio(aspectRatio())
-            .setFlashMode(flashImageMode())
-            .build()
-
-        videoCapture = buildVideoCapture(videoQuality, videoFps)
-
-        cameraProvider.unbindAll()
-        val useCases: List<UseCase> =
-            if (mode == MODE_VIDEO) listOf(preview, videoCapture)
-            else listOf(preview, imageCapture)
-
-        val camera = try {
-            cameraProvider.bindToLifecycle(this, selector, *useCases.toTypedArray())
-        } catch (e: Exception) {
-            Log.e(TAG, "Camera binding failed", e)
-            toast("No usable camera found")
+        var bound = engine.bind(currentConfig())
+        if (!bound && video && (fps != 30 || quality != Quality.FHD)) {
+            fps = 30
+            quality = Quality.FHD
+            bound = engine.bind(currentConfig())
+            if (bound) toast("That video setting isn't supported, using 1080p 30")
+        }
+        if (!bound) {
+            toast("Camera unavailable")
             return
         }
 
-        preview.setSurfaceProvider(previewView.surfaceProvider)
+        // Fall back to a quality the current lens really offers.
+        val qualities = engine.supportedQualities()
+        if (video && qualities.isNotEmpty() && quality !in qualities) {
+            quality = if (Quality.FHD in qualities) Quality.FHD else qualities.first()
+            engine.bind(currentConfig())
+        }
+        if (video && fps !in engine.supportedFps(front)) fps = 30
 
-        // CameraX 1.3.x: CameraInfo/CameraControl come from the bound Camera.
-        cameraInfo = camera.cameraInfo
-        cameraControl = camera.cameraControl
-
-        observeCameraStates()
-        refreshHardwareInfo()
-        applyFlash()
-        if (manualIso) applyManualIso(isoValue)
-        updateTopBar()
+        engine.setZoom(wantedZoom)
+        engine.setTorch(video && torch)
+        engine.imageCapture?.flashMode = hardwareFlashMode()
+        if (iso != null) engine.setIso(iso)
+        screen.overlay.reset(engine.exposureRange())
+        updateModeUi()
+        // Safety net in case the stream state never changes.
+        handler.postDelayed({ revealViewfinder() }, 900)
     }
 
-    /**
-     * CameraX 1.3.x has no RATIO_SQUARE constant: the 1:1 mode streams at 4:3 and
-     * relies on the PreviewView ViewPort (a square view + FILL_CENTER), which
-     * CameraX applies as a crop to every bound use case — true ViewPort cropping.
-     */
-    private fun aspectRatio(): Int = when (aspectNum) {
-        16 -> AspectRatio.RATIO_16_9
-        else -> AspectRatio.RATIO_4_3
+    private fun revealViewfinder() {
+        screen.cover.animate().alpha(0f).setDuration(180).start()
     }
 
-    /**
-     * Builds the VideoCapture with a Recorder (QualitySelector) + target frame
-     * rate. Note: on CameraX 1.3.x, VideoCapture.Builder.setTargetAspectRatio /
-     * setTargetResolution are unsupported — the quality selector + frame rate
-     * Range are the supported configuration path.
-     */
-    private fun buildVideoCapture(quality: Quality, fps: Int): VideoCapture<Recorder> {
-        val qualitySelector = QualitySelector.from(
-            quality,
-            FallbackStrategy.higherQualityOrLowerThan(quality)
-        )
-        recorder = Recorder.Builder()
-            .setQualitySelector(qualitySelector)
-            .build()
-        return try {
-            VideoCapture.Builder(recorder)
-                .setTargetFrameRate(Range.create(fps, fps))
-                .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY)
-                .build()
-        } catch (e: Exception) {
-            Log.w(TAG, "VideoCapture build failed, falling back to FHD/30", e)
-            recorder = Recorder.Builder()
-                .setQualitySelector(
-                    QualitySelector.from(
-                        Quality.FHD,
-                        FallbackStrategy.higherQualityOrLowerThan(Quality.FHD)
-                    )
-                )
-                .build()
-            VideoCapture.Builder(recorder)
-                .setTargetFrameRate(Range.create(30, 30))
-                .setMirrorMode(MirrorMode.MIRROR_MODE_ON_FRONT_ONLY)
-                .build()
+    private fun updateModeUi() {
+        screen.setViewfinderRatio(if (video) Aspect.WIDE.heightOverWidth else aspect.heightOverWidth)
+        if (recording == null) {
+            screen.shutter.setState(
+                if (video) ShutterButton.State.VIDEO else ShutterButton.State.PHOTO
+            )
+        }
+        screen.videoBadge.visibility = if (video && recording == null) View.VISIBLE else View.GONE
+        screen.videoBadge.text = "${qualityName(quality)}  ·  $fps"
+        updateFlashButton()
+    }
+
+    private fun switchMode(toVideo: Boolean) {
+        if (toVideo == video || imageRequest || videoRequest) return
+        if (recording != null || capturing || countdownLeft > 0) {
+            screen.modeScroller.setVideo(video)
+            return
+        }
+        video = toVideo
+        zoom = 1f
+        torch = false
+        screen.modeScroller.setVideo(video)
+        Ui.tick(screen.modeScroller)
+        rebind()
+        if (video && !MediaRepo.hasMicrophone(this) && !askedMicrophone) {
+            askedMicrophone = true
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
         }
     }
 
-    private fun qualityLabel(quality: Quality): String = when (quality) {
-        Quality.SD, Quality.LOWEST -> "SD"
-        Quality.HD -> "HD"
-        Quality.FHD -> "FHD"
-        else -> "UHD"
+    private fun flipCamera() {
+        if (!engine.isReady || recording != null || capturing || countdownLeft > 0) return
+        if (!engine.hasLens(!front)) {
+            toast("No other camera found")
+            return
+        }
+        Ui.tick(screen.flipButton)
+        screen.flipButton.animate().rotationBy(180f).setDuration(260).start()
+        front = !front
+        zoom = 1f
+        torch = false
+        iso = null
+        rebind()
     }
 
-    private fun qualityOfLabel(label: String): Quality = when (label) {
-        "SD" -> Quality.SD
-        "HD" -> Quality.HD
-        "FHD" -> Quality.FHD
-        else -> Quality.UHD
-    }
+    // -------------------------------------------------------------------- Flash
 
-    private fun observeCameraStates() {
-        cameraInfo?.zoomState?.observe(this) { s: ZoomState ->
-            currentZoom = s.zoomRatio
-            zoomRange = s.minZoomRatio.coerceAtLeast(1f)..s.maxZoomRatio.coerceAtLeast(1f)
-            updateZoomPills()
-        }
-    }
-
-    // ------------------------------------------------- Hardware capability probing
-    @OptIn(ExperimentalCamera2Interop::class)
-    private fun refreshHardwareInfo() {
-        val info = cameraInfo ?: return
-        val cam2 = Camera2CameraInfo.from(info)
-
-        // ISO range from the sensor characteristics (Camera2CameraInfo).
-        val isoRange = cam2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
-        if (isoRange != null) {
-            isoMin = isoRange.lower
-            isoMax = isoRange.upper
-        } else {
-            isoMin = 100
-            isoMax = 3200
-        }
-        if (isoSeekBar.max != (isoMax - isoMin)) {
-            isoSeekBar.max = isoMax - isoMin
-        }
-
-        // Exposure compensation range from CameraInfo.exposureState.
-        val exposureState: ExposureState? = info.exposureState
-        if (exposureState != null && exposureState.isExposureCompensationSupported) {
-            val r = exposureState.exposureCompensationRange
-            exposureRange = if (r != null) r.lower..r.upper else 0..0
-            focusOverlay.exposureRange = exposureRange
-            if (!exposureRange.isEmpty()) {
-                cameraControl?.setExposureCompensationIndex(
-                    exposureState.exposureCompensationIndex
-                )
-            }
-        }
-
-        // Resolutions via CameraX QualitySelector; frame rates via the device's
-        // supported AE frame-rate ranges (30 fps is always offered as a baseline).
-        videoOptions.clear()
-        val qualities = try {
-            QualitySelector.getSupportedQualities(info)
-        } catch (e: Exception) {
-            Log.w(TAG, "Supported qualities query failed", e)
-            emptyList()
-        }
-        val fpsChoices = try {
-            (cameraInfo?.supportedFrameRateRanges
-                ?.flatMap { range -> listOf(range.lower, range.upper) }
-                ?.filter { it >= 15 }
-                ?.toSortedSet()
-                ?: emptySet()) + 30
-        } catch (e: Exception) {
-            Log.w(TAG, "Frame rate range query failed", e)
-            setOf(30)
-        }.toSortedSet().toList()
-
-        val combos = linkedSetOf<Pair<String, Int>>()
-        qualities.forEach { quality ->
-            val label = qualityLabel(quality)
-            fpsChoices.forEach { fps -> combos.add(label to fps) }
-        }
-        if (combos.isEmpty()) combos.add("FHD" to 30)
-
-        videoOptions.addAll(
-            combos.map { (label, fps) -> VideoOption(label, qualityOfLabel(label), fps) }
-        )
-        val fhd30 = videoOptions.indexOfFirst { it.label == "FHD" && it.fps == 30 }
-        selectedVideoOption = if (fhd30 >= 0) fhd30 else 0
-    }
-
-    // ---------------------------------------------------------------------- Flash
-    /**
-     * CameraX 1.3.x ImageCapture has no FLASH_MODE_SCREEN: the front-camera
-     * "bright white screen-flash" is produced by the white overlay in
-     * [takePhoto] (whiteFlash()), while rear-camera ON uses the hardware flash.
-     */
-    private fun flashImageMode(): Int = when (flashState) {
-        FLASH_OFF -> ImageCapture.FLASH_MODE_OFF
-        FLASH_ON -> if (lensFacing == CameraSelector.LENS_FACING_FRONT)
-            ImageCapture.FLASH_MODE_OFF
-        else
-            ImageCapture.FLASH_MODE_ON
-        FLASH_AUTO -> ImageCapture.FLASH_MODE_AUTO
-        else -> ImageCapture.FLASH_MODE_OFF
-    }
-
-    private fun applyFlash() {
-        val ctrl = cameraControl ?: return
-        if (mode == MODE_VIDEO) {
-            ctrl.enableTorch(flashState == FLASH_ON)
-        } else {
-            imageCapture.flashMode = flashImageMode()
-        }
-    }
+    /** The front camera uses the white screen instead of a hardware flash. */
+    private fun hardwareFlashMode() =
+        if (front || !engine.hasFlashUnit) ImageCapture.FLASH_MODE_OFF else photoFlash
 
     private fun cycleFlash() {
-        flashState = when (flashState) {
-            FLASH_OFF -> FLASH_ON
-            FLASH_ON -> FLASH_AUTO
-            else -> FLASH_OFF
+        if (!engine.isReady || capturing) return
+        val screenFlashOnly = front && !video
+        if (!screenFlashOnly && !engine.hasFlashUnit) {
+            toast("This camera has no flash")
+            return
         }
-        updateFlashPill()
-        applyFlash()
-    }
-
-    private fun updateFlashPill() {
-        flashLabel.text = when (flashState) {
-            FLASH_OFF -> "OFF"
-            FLASH_ON -> "ON"
-            else -> "AUTO"
-        }
-        val active = flashState != FLASH_OFF
-        pillActive(flashPill, flashIcon, flashLabel, active)
-    }
-
-    // -------------------------------------------------------------- Aspect ratio
-    private fun cycleAspect() {
-        aspectNum = when {
-            aspectNum == 4 -> 16
-            aspectNum == 16 -> 1
-            else -> 4
-        }
-        aspectDen = when (aspectNum) {
-            4 -> 3
-            16 -> 9
-            else -> 1
-        }
-        updateAspectPill()
-        animateAspect()
-        bindCamera()
-    }
-
-    private fun updateAspectPill() {
-        aspectLabel.text = "${aspectNum}:${aspectDen}"
-        pillActive(aspectPill, aspectIcon, aspectLabel, false)
-    }
-
-    /** Animate the viewfinder height so the crop ratio changes smoothly. */
-    private fun animateAspect() {
-        val targetH = if (previewView.width > 0) {
-            (previewView.width.toFloat() * aspectDen / aspectNum).toInt()
-        } else 0
-        if (targetH <= 0) return
-        val lp = previewView.layoutParams as FrameLayout.LayoutParams
-        val anim = ValueAnimator.ofInt(lp.height, targetH)
-        anim.duration = 220
-        anim.interpolator = DecelerateInterpolator()
-        anim.addUpdateListener { value ->
-            lp.height = value.animatedValue as Int
-            previewView.requestLayout()
-        }
-        anim.start()
-    }
-
-    // --------------------------------------------------------------- Zoom
-    private fun setZoom(ratio: Float, view: View) {
-        Ui.tick(view)
-        val target = ratio.coerceIn(zoomRange.start, zoomRange.endInclusive)
-        cameraControl?.setZoomRatio(target)
-        currentZoom = target
-        updateZoomPills()
-    }
-
-    private fun updateZoomPills() {
-        setZoomPillActive(zoom1x, abs(currentZoom - 1f) < 0.2f)
-        setZoomPillActive(zoom2x, abs(currentZoom - 2f) < 0.2f)
-        setZoomPillActive(zoom4x, abs(currentZoom - 4f) < 0.2f)
-    }
-
-    private fun setZoomPillActive(tv: TextView, active: Boolean) {
-        tv.setBackgroundResource(
-            if (active) R.drawable.bg_zoom_pill_active else R.drawable.bg_zoom_pill
-        )
-        tv.setTextColor(if (active) 0xFFFFD60A.toInt() else 0xFF8E8E93.toInt())
-    }
-
-    // --------------------------------------------------------------- Mode switch
-    private fun switchMode(video: Boolean) {
-        if (video == (mode == MODE_VIDEO)) return
-        Ui.tick(modeScroller)
-        if (isRecording) stopRecording(showToast = false)
-
-        mode = if (video) MODE_VIDEO else MODE_PHOTO
-        modeScroller.setVideo(video, animate = true)
-        shutterBtn.setState(
-            if (video) ShutterButton.State.VIDEO else ShutterButton.State.PHOTO,
-            animate = true
-        )
-        bindCamera()
-    }
-
-    // ------------------------------------------------------------- Photo capture
-    private fun takePhoto() {
-        if (cameraControl == null) return
-        Ui.confirm(shutterBtn)
-        // Bright white screen-flash for front-camera selfies.
-        if (lensFacing == CameraSelector.LENS_FACING_FRONT && flashState == FLASH_ON) {
-            whiteFlash()
-        }
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, "IMG_" + Ui.mediaTimestamp())
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-        }
-        val options = ImageCapture.OutputFileOptions.Builder(
-            contentResolver,
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            values
-        )
-            .build()
-
-        imageCapture.takePicture(
-            options,
-            uiExecutor,
-            object : ImageCapture.OnImageSavedCallback {
-                override fun onImageSaved(result: ImageCapture.OutputFileResults) {
-                    onMediaSaved(result.savedUri)
-                }
-
-                override fun onError(exc: ImageCaptureException) {
-                    Log.e(TAG, "Photo capture failed", exc)
-                    toast("Capture failed")
-                }
-            }
-        )
-        shutterFlash()
-    }
-
-    // ----------------------------------------------------------- Video recording
-    private fun toggleRecording() {
-        if (isRecording) stopRecording(showToast = true) else startRecording()
-    }
-
-    private fun startRecording() {
-        if (mode != MODE_VIDEO || cameraControl == null) return
-        Ui.confirm(shutterBtn)
-
-        val values = ContentValues().apply {
-            put(MediaStore.Video.Media.DISPLAY_NAME, "VID_" + Ui.mediaTimestamp())
-            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-        }
-        val options = MediaStoreOutputOptions.Builder(
-            contentResolver,
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-        )
-            .setContentValues(values)
-            .build()
-
-        val pending = recorder.prepareRecording(this, options)
-        activeRecording = pending.start(uiExecutor) { event ->
-            if (event is VideoRecordEvent.Finalize) {
-                if (event.hasError()) {
-                    Log.e(TAG, "Recording failed with code ${event.outputResults}")
-                    isRecording = false
-                    updateRecordingUi(false)
-                    toast("Recording failed")
-                } else {
-                    onMediaSaved(event.outputResults.outputUri)
-                }
-            }
-        }
-
-        isRecording = true
-        updateRecordingUi(true)
-        shutterFlash()
-    }
-
-    private fun stopRecording(showToast: Boolean) {
-        if (!isRecording) return
-        activeRecording?.stop()
-        activeRecording = null
-        isRecording = false
-        updateRecordingUi(false)
-        shutterFlash()
-        if (showToast) toast("Video saved")
-    }
-
-    private fun updateRecordingUi(recording: Boolean) {
-        recIndicator.visibility = if (recording) View.VISIBLE else View.GONE
-        shutterBtn.setState(
-            if (recording) ShutterButton.State.RECORDING else ShutterButton.State.VIDEO,
-            animate = true
-        )
-        if (recording) startRecTimer() else stopRecTimer()
-    }
-
-    private val recTickRunnable = object : Runnable {
-        override fun run() {
-            if (!isRecording) return
-            val elapsed = System.currentTimeMillis() - recStartMs
-            recTimer.text = formatTime(elapsed)
-            handler.postDelayed(this, 250)
-        }
-    }
-
-    private var recStartMs = 0L
-
-    private fun startRecTimer() {
-        recStartMs = System.currentTimeMillis()
-        handler.post(recTickRunnable)
-    }
-
-    private fun stopRecTimer() {
-        handler.removeCallbacks(recTickRunnable)
-        recTimer.text = "00:00"
-    }
-
-    private fun formatTime(elapsedMs: Long): String {
-        val totalSec = elapsedMs / 1000
-        val s = totalSec % 60
-        val m = (totalSec / 60) % 60
-        return String.format(Locale.US, "%02d:%02d", m, s)
-    }
-
-    // ------------------------------------------------------------- Resolution UI
-    private fun updateTopBar() {
-        val opt = videoOptions.getOrNull(selectedVideoOption)
-        if (mode == MODE_VIDEO && opt != null) {
-            resBadge.text = "${opt.label} • ${opt.fps}"
-            resBadge.visibility = View.VISIBLE
+        Ui.tick(screen.flashButton)
+        if (video) {
+            torch = !torch
+            engine.setTorch(torch)
         } else {
-            resBadge.visibility = View.GONE
+            photoFlash = when (photoFlash) {
+                ImageCapture.FLASH_MODE_OFF -> ImageCapture.FLASH_MODE_ON
+                ImageCapture.FLASH_MODE_ON ->
+                    if (front) ImageCapture.FLASH_MODE_OFF else ImageCapture.FLASH_MODE_AUTO
+                else -> ImageCapture.FLASH_MODE_OFF
+            }
+            engine.imageCapture?.flashMode = hardwareFlashMode()
+        }
+        updateFlashButton()
+    }
+
+    private fun updateFlashButton() {
+        val on = if (video) torch else photoFlash == ImageCapture.FLASH_MODE_ON
+        val auto = !video && photoFlash == ImageCapture.FLASH_MODE_AUTO
+        screen.flashButton.setImageResource(
+            when {
+                on -> R.drawable.ic_flash_on
+                auto -> R.drawable.ic_flash_auto
+                else -> R.drawable.ic_flash_off
+            }
+        )
+        screen.flashButton.imageTintList =
+            ColorStateList.valueOf(if (on || auto) Ui.YELLOW else Ui.WHITE)
+    }
+
+    // ------------------------------------------------------------------ Shutter
+
+    private fun onShutter() {
+        if (!engine.isReady) return
+        if (recording != null) {
+            Ui.confirm(screen.shutter)
+            stopRecording()
+            return
+        }
+        if (countdownLeft > 0) {
+            cancelCountdown()
+            return
+        }
+        if (capturing) return
+        if (!MediaRepo.canSave(this)) {
+            requestPermissions(
+                arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), REQUEST_STORAGE
+            )
+            return
+        }
+        Ui.confirm(screen.shutter)
+        if (timerSeconds > 0) {
+            countdownLeft = timerSeconds
+            countdownTick.run()
+        } else {
+            capture()
         }
     }
 
-    private fun showResPopup() {
-        if (videoOptions.isEmpty()) {
-            toast("No high-speed video modes detected")
+    private val countdownTick = object : Runnable {
+        override fun run() {
+            if (countdownLeft <= 0) {
+                screen.countdown.visibility = View.GONE
+                capture()
+                return
+            }
+            screen.countdown.text = countdownLeft.toString()
+            screen.countdown.visibility = View.VISIBLE
+            countdownLeft--
+            handler.postDelayed(this, 1000)
+        }
+    }
+
+    private fun cancelCountdown() {
+        handler.removeCallbacks(countdownTick)
+        countdownLeft = 0
+        if (::screen.isInitialized) screen.countdown.visibility = View.GONE
+    }
+
+    private fun capture() {
+        if (video) startRecording() else takePhoto()
+    }
+
+    // -------------------------------------------------------------------- Photo
+
+    private fun takePhoto() {
+        if (engine.imageCapture == null) return
+        capturing = true
+        screen.shutter.isEnabled = false
+        if (front && photoFlash == ImageCapture.FLASH_MODE_ON) {
+            setScreenFlash(true)
+            // Give the display and auto exposure a moment to adapt.
+            handler.postDelayed({ savePhoto() }, 450)
+        } else {
+            blink()
+            savePhoto()
+        }
+    }
+
+    private fun savePhoto() {
+        val capture = engine.imageCapture
+        if (capture == null) {
+            finishCapture()
             return
         }
-        if (isRecording) {
-            toast("Stop recording to change resolution")
+        @Suppress("DEPRECATION")
+        val target: Uri? =
+            if (imageRequest) intent.getParcelableExtra(MediaStore.EXTRA_OUTPUT) else null
+
+        var stream: OutputStream? = null
+        try {
+            val builder = if (target != null) {
+                val output = contentResolver.openOutputStream(target)
+                    ?: throw IllegalStateException("Cannot open $target")
+                stream = output
+                ImageCapture.OutputFileOptions.Builder(output)
+            } else {
+                ImageCapture.OutputFileOptions.Builder(
+                    contentResolver,
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    MediaRepo.photoValues()
+                )
+            }
+            val metadata = ImageCapture.Metadata()
+            metadata.isReversedHorizontal = front && mirrorSelfie
+            val options = builder.setMetadata(metadata).build()
+
+            capture.takePicture(options, ui, object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(result: ImageCapture.OutputFileResults) {
+                    stream?.close()
+                    finishCapture()
+                    onPhotoSaved(result.savedUri)
+                }
+
+                override fun onError(exception: ImageCaptureException) {
+                    Log.e(TAG, "Photo capture failed", exception)
+                    stream?.close()
+                    finishCapture()
+                    toast("Couldn't take the photo")
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(TAG, "Photo capture failed", e)
+            stream?.close()
+            finishCapture()
+            toast("Couldn't take the photo")
+        }
+    }
+
+    private fun finishCapture() {
+        capturing = false
+        screen.shutter.isEnabled = true
+        setScreenFlash(false)
+    }
+
+    private fun onPhotoSaved(uri: Uri?) {
+        if (!imageRequest) {
+            uri?.let { showThumbnail(it) }
             return
         }
-
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(20), dp(10), dp(20), dp(10))
+        val result = Intent()
+        if (uri != null) {
+            // The caller gave no output file, so it expects a small bitmap.
+            MediaRepo.thumbnail(this, uri, 320)?.let { result.putExtra("data", it) }
         }
+        setResult(RESULT_OK, result)
+        finish()
+    }
 
-        videoOptions.forEach { opt ->
-            val btn = TextView(this).apply {
-                text = "${opt.label} • ${opt.fps}"
-                setTextColor(Color.WHITE)
-                textSize = 14f
-                typeface = Typeface.DEFAULT_BOLD
-                setPadding(dp(24), dp(11), dp(24), dp(11))
-                setBackgroundResource(R.drawable.bg_popup_item)
-                setOnClickListener {
-                    Ui.tick(this)
-                    selectVideoOption(opt)
+    private fun blink() {
+        screen.cover.animate().cancel()
+        screen.cover.alpha = 1f
+        screen.cover.animate().alpha(0f).setDuration(160).start()
+    }
+
+    private fun setScreenFlash(on: Boolean) {
+        screen.screenFlash.visibility = if (on) View.VISIBLE else View.GONE
+        val params = window.attributes
+        params.screenBrightness =
+            if (on) WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_FULL
+            else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        window.attributes = params
+    }
+
+    // -------------------------------------------------------------------- Video
+
+    @SuppressLint("MissingPermission")
+    private fun startRecording() {
+        val recorder = engine.videoCapture?.output ?: return
+        @Suppress("DEPRECATION")
+        val target: Uri? =
+            if (videoRequest) intent.getParcelableExtra(MediaStore.EXTRA_OUTPUT) else null
+
+        var file: ParcelFileDescriptor? = null
+        try {
+            var pending = if (target != null) {
+                val descriptor = contentResolver.openFileDescriptor(target, "rw")
+                    ?: throw IllegalStateException("Cannot open $target")
+                file = descriptor
+                recorder.prepareRecording(
+                    this, FileDescriptorOutputOptions.Builder(descriptor).build()
+                )
+            } else {
+                val options = MediaStoreOutputOptions.Builder(
+                    contentResolver, MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                )
+                    .setContentValues(MediaRepo.videoValues())
+                    .build()
+                recorder.prepareRecording(this, options)
+            }
+            if (MediaRepo.hasMicrophone(this)) {
+                pending = pending.withAudioEnabled()
+            } else {
+                toast("Recording without sound: microphone not allowed")
+            }
+
+            recording = pending.start(ui) { event ->
+                when (event) {
+                    is VideoRecordEvent.Status -> screen.recordTimer.text =
+                        formatDuration(event.recordingStats.recordedDurationNanos)
+
+                    is VideoRecordEvent.Finalize -> {
+                        file?.close()
+                        onRecordingFinished(event, target)
+                    }
                 }
             }
-            container.addView(btn)
-        }
-
-        resPopup?.dismiss()
-        resPopup = PopupWindow(
-            container,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            true
-        ).apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-            elevation = resources.displayMetrics.density * 12f
-            setOutsideTouchable(true)
-        }
-        resPopup?.showAsDropDown(resBadge, 0, 0)
-    }
-
-    private fun selectVideoOption(opt: VideoOption) {
-        selectedVideoOption = videoOptions.indexOf(opt)
-        videoQuality = opt.quality
-        videoFps = opt.fps
-        updateTopBar()
-        resPopup?.dismiss()
-        if (mode == MODE_VIDEO && !isRecording) {
-            videoCapture = buildVideoCapture(videoQuality, videoFps)
-            bindCamera()
+            screen.recordTimer.text = formatDuration(0)
+            screen.recordTimer.visibility = View.VISIBLE
+            screen.shutter.setState(ShutterButton.State.RECORDING)
+            setRecordingControls(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Recording could not start", e)
+            file?.close()
+            toast("Couldn't start recording")
         }
     }
 
-    // ------------------------------------------------------------ Manual ISO
-    private fun toggleProDrawer() {
-        proDrawerOpen = !proDrawerOpen
-        val h = resources.getDimensionPixelSize(R.dimen.pro_drawer_height)
-        proDrawer.animate()
-            .translationY(if (proDrawerOpen) 0f else h.toFloat())
-            .setDuration(260)
-            .setInterpolator(DecelerateInterpolator())
-            .start()
-        isoSeekBar.isEnabled = proDrawerOpen
-        pillActive(proPill, proIcon, null, proDrawerOpen)
+    /** The file is only complete once the Finalize event arrives. */
+    private fun stopRecording() {
+        val active = recording ?: return
+        screen.shutter.isEnabled = false
+        active.stop()
     }
 
-    private fun setManualIso(iso: Int) {
-        isoValue = iso.coerceIn(isoMin, isoMax)
-        isoLabel.text = "ISO $isoValue"
-        applyManualIso(isoValue)
+    private fun onRecordingFinished(event: VideoRecordEvent.Finalize, target: Uri?) {
+        recording = null
+        screen.shutter.isEnabled = true
+        screen.recordTimer.visibility = View.GONE
+        setRecordingControls(false)
+        updateModeUi()
+
+        // Leaving the app or filling the disk ends with an "error" but a playable file.
+        val usable = !event.hasError() ||
+            event.error == VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE ||
+            event.error == VideoRecordEvent.Finalize.ERROR_INSUFFICIENT_STORAGE ||
+            event.error == VideoRecordEvent.Finalize.ERROR_FILE_SIZE_LIMIT_REACHED
+        if (!usable) {
+            Log.e(TAG, "Recording failed: ${event.error}", event.cause)
+            toast("Recording failed")
+            return
+        }
+        val uri = target ?: event.outputResults.outputUri
+        if (videoRequest) {
+            val result = Intent().setData(uri)
+            // Only our own MediaStore entry may be re-granted to the caller.
+            if (target == null) result.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            setResult(RESULT_OK, result)
+            finish()
+        } else {
+            showThumbnail(uri)
+            toast("Video saved")
+        }
     }
 
-    @OptIn(ExperimentalCamera2Interop::class)
-    private fun applyManualIso(iso: Int) {
-        val ctrl = cameraControl ?: return
-        val c2 = Camera2CameraControl.from(ctrl)
-        c2.setCaptureRequestOptions(
-            CaptureRequestOptions.Builder()
-                .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, iso)
-                .setCaptureRequestOption(
-                    CaptureRequest.CONTROL_AE_MODE,
-                    CaptureRequest.CONTROL_AE_MODE_OFF
-                )
-                .build()
+    private fun setRecordingControls(active: Boolean) {
+        val visibility = if (active) View.INVISIBLE else View.VISIBLE
+        screen.settingsButton.visibility = visibility
+        screen.flipButton.visibility = visibility
+        if (!imageRequest && !videoRequest) {
+            screen.modeScroller.visibility = visibility
+            screen.thumbnail.visibility = visibility
+        }
+        if (active) screen.videoBadge.visibility = View.GONE
+    }
+
+    private fun formatDuration(nanos: Long): String {
+        val seconds = nanos / 1_000_000_000
+        return String.format(
+            Locale.US, "%02d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60
         )
-        manualIso = true
     }
 
-    @OptIn(ExperimentalCamera2Interop::class)
-    private fun resetManualIso() {
-        val ctrl = cameraControl ?: return
-        Camera2CameraControl.from(ctrl).clearCaptureRequestOptions()
-        manualIso = false
-        isoValue = 0
-        isoLabel.text = "ISO AUTO"
-        isoSeekBar.progress = 0
-    }
+    // -------------------------------------------------------------------- Album
 
-    // -------------------------------------------------------------- Flip camera
-    private fun flipCamera() {
-        Ui.tick(flipBtn)
-        val flipAnim = ObjectAnimator.ofFloat(
-            flipBtn, "rotation", flipBtn.rotation, flipBtn.rotation + 180f
-        )
-        flipAnim.duration = 280
-        flipAnim.interpolator = DecelerateInterpolator()
-        flipAnim.start()
-        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK)
-            CameraSelector.LENS_FACING_FRONT
-        else
-            CameraSelector.LENS_FACING_BACK
-        applyFlash()
-        bindCamera()
-    }
-
-    // ------------------------------------------------------------- Media & flash
-    private fun onMediaSaved(uri: Uri?) {
-        if (uri == null) return
-        lastMediaUri = uri
-        ThumbnailLoader.load(contentResolver, uri, thumbView)
-        pop(thumbView)
-    }
-
-    private fun pop(view: View) {
-        view.animate()
-            .scaleX(1.18f)
-            .scaleY(1.18f)
-            .setDuration(110)
-            .withEndAction {
-                view.scaleX = 1f
-                view.scaleY = 1f
+    private fun refreshThumbnail() {
+        if (io.isShutdown) return
+        io.execute {
+            val uri = MediaRepo.latest(contentResolver)
+            val bitmap = uri?.let { MediaRepo.thumbnail(this, it, 192) }
+            handler.post {
+                lastMedia = uri
+                if (bitmap != null) {
+                    screen.thumbnail.setImageBitmap(bitmap)
+                } else {
+                    screen.thumbnail.setImageResource(R.drawable.ic_thumb)
+                }
             }
-            .start()
+        }
     }
 
-    private fun openLastMedia() {
-        val uri = lastMediaUri ?: return
-        val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    private fun showThumbnail(uri: Uri) {
+        lastMedia = uri
+        if (io.isShutdown) return
+        io.execute {
+            val bitmap = MediaRepo.thumbnail(this, uri, 192) ?: return@execute
+            handler.post {
+                screen.thumbnail.setImageBitmap(bitmap)
+                screen.thumbnail.scaleX = 0.7f
+                screen.thumbnail.scaleY = 0.7f
+                screen.thumbnail.animate().scaleX(1f).scaleY(1f).setDuration(180).start()
+            }
         }
-        val type = try {
-            contentResolver.getType(uri)
-        } catch (e: Exception) {
-            null
+    }
+
+    private fun openAlbum() {
+        val uri = lastMedia
+        if (uri == null) {
+            if (MediaRepo.hasAlbumAccess(this)) {
+                toast("No photos yet")
+            } else {
+                val wanted = MediaRepo.missing(this)
+                requestPermissions(wanted.toTypedArray(), REQUEST_ALBUM)
+            }
+            return
         }
-        if (type != null) intent.setDataAndType(uri, type) else intent.setData(uri)
+        val view = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, contentResolver.getType(uri))
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         try {
-            startActivity(intent)
+            startActivity(view)
         } catch (e: Exception) {
-            toast("Cannot open media")
+            Log.w(TAG, "No gallery app", e)
+            toast("No app can open this file")
         }
     }
 
-    /** Instant black-out shutter flash — zero capture lag. */
-    private fun shutterFlash() {
-        shutterFlash.alpha = 1f
-        shutterFlash.visibility = View.VISIBLE
-        shutterFlash.animate()
-            .alpha(0f)
-            .setDuration(120)
-            .withEndAction { shutterFlash.visibility = View.INVISIBLE }
-            .start()
+    // ----------------------------------------------------------------- Settings
+
+    private fun openSettings() {
+        if (!engine.isReady || recording != null || capturing) return
+        cancelCountdown()
+        val list = mutableListOf<Setting>()
+
+        if (video) {
+            val qualities = engine.supportedQualities()
+            if (qualities.isNotEmpty()) {
+                list += Setting(
+                    "Resolution", qualities.map { qualityName(it) }, qualities.indexOf(quality)
+                ) { applySetting { quality = qualities[it] } }
+            }
+            val rates = engine.supportedFps(front)
+            list += Setting("Frames per second", rates.map { "$it" }, rates.indexOf(fps)) {
+                applySetting { fps = rates[it] }
+            }
+        } else {
+            val ratios = Aspect.values()
+            list += Setting("Aspect ratio", ratios.map { it.label }, aspect.ordinal) {
+                applySetting { aspect = ratios[it] }
+            }
+            list += Setting("Photo priority", listOf("Quality", "Speed"), if (fastShutter) 1 else 0) {
+                applySetting { fastShutter = it == 1 }
+            }
+        }
+
+        val timers = listOf(0, 3, 10)
+        list += Setting("Timer", listOf("Off", "3s", "10s"), timers.indexOf(timerSeconds)) {
+            applySetting(needsRebind = false) { timerSeconds = timers[it] }
+        }
+        list += Setting("Grid", listOf("Off", "On"), if (grid) 1 else 0) {
+            applySetting(needsRebind = false) {
+                grid = it == 1
+                screen.overlay.showGrid = grid
+            }
+        }
+        if (front) {
+            list += Setting(
+                "Save selfies as you see them", listOf("Mirrored", "Flipped"),
+                if (mirrorSelfie) 0 else 1
+            ) { applySetting(needsRebind = video) { mirrorSelfie = it == 0 } }
+        }
+        val stops = engine.isoStops()
+        if (stops.isNotEmpty()) {
+            val selected = iso?.let { stops.indexOf(it) + 1 } ?: 0
+            list += Setting("ISO", listOf("Auto") + stops.map { "$it" }, selected) {
+                applySetting(needsRebind = false) {
+                    iso = if (it == 0) null else stops[it - 1]
+                    engine.setIso(iso)
+                }
+            }
+        }
+        screen.sheet.show(list)
     }
 
-    private fun whiteFlash() {
-        flashScreen.alpha = 1f
-        flashScreen.visibility = View.VISIBLE
-        flashScreen.animate()
-            .alpha(0f)
-            .setDuration(170)
-            .withEndAction { flashScreen.visibility = View.INVISIBLE }
-            .start()
+    /** Apply one change, remember it and redraw the open sheet. */
+    private fun applySetting(needsRebind: Boolean = true, change: () -> Unit) {
+        change()
+        if (needsRebind) rebind()
+        savePreferences()
+        openSettings()
     }
 
-    // ------------------------------------------------------------------ Helpers
-    private fun hasCameraPermission(): Boolean =
-        ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) ==
-            PackageManager.PERMISSION_GRANTED
-
-    private fun pillActive(
-        container: LinearLayout,
-        icon: ImageView,
-        label: TextView?,
-        active: Boolean
-    ) {
-        container.setBackgroundResource(
-            if (active) R.drawable.bg_pill_active else R.drawable.bg_pill
-        )
-        icon.imageTintList = ColorStateList.valueOf(
-            if (active) 0xFF1A1A1A.toInt() else 0xFFFFFFFF.toInt()
-        )
-        label?.setTextColor(
-            if (active) 0xFFFFD60A.toInt() else 0xFF8E8E93.toInt()
-        )
+    private fun loadPreferences() {
+        aspect = Aspect.values().getOrElse(prefs.getInt("aspect", 0)) { Aspect.FOUR_THREE }
+        quality = qualityFromName(prefs.getString("quality", null))
+        fps = prefs.getInt("fps", 30)
+        timerSeconds = prefs.getInt("timer", 0)
+        grid = prefs.getBoolean("grid", false)
+        mirrorSelfie = prefs.getBoolean("mirror", true)
+        fastShutter = prefs.getBoolean("fast", false)
     }
 
-    private fun dp(value: Int): Int =
-        (value * resources.displayMetrics.density).toInt()
+    private fun savePreferences() {
+        prefs.edit()
+            .putInt("aspect", aspect.ordinal)
+            .putString("quality", qualityName(quality))
+            .putInt("fps", fps)
+            .putInt("timer", timerSeconds)
+            .putBoolean("grid", grid)
+            .putBoolean("mirror", mirrorSelfie)
+            .putBoolean("fast", fastShutter)
+            .apply()
+    }
+
+    private fun qualityName(value: Quality) = when (value) {
+        Quality.UHD -> "4K"
+        Quality.FHD -> "1080p"
+        Quality.HD -> "720p"
+        else -> "480p"
+    }
+
+    private fun qualityFromName(name: String?): Quality = when (name) {
+        "4K" -> Quality.UHD
+        "720p" -> Quality.HD
+        "480p" -> Quality.SD
+        else -> Quality.FHD
+    }
+
+    // ----------------------------------------------------------------- Rotation
+
+    private fun onRotated(degrees: Int) {
+        if (degrees == OrientationEventListener.ORIENTATION_UNKNOWN) return
+        // Change only when clearly past a diagonal, so it never flickers.
+        val nearest = ((degrees + 45) / 90 * 90) % 360
+        val distance = Math.abs((degrees - nearest + 540) % 360 - 180)
+        if (distance > 35) return
+        val rotation = when (nearest) {
+            90 -> Surface.ROTATION_270
+            180 -> Surface.ROTATION_180
+            270 -> Surface.ROTATION_90
+            else -> Surface.ROTATION_0
+        }
+        if (rotation == engine.rotation) return
+        engine.rotation = rotation
+        val angle = when (rotation) {
+            Surface.ROTATION_90 -> 90f
+            Surface.ROTATION_270 -> -90f
+            Surface.ROTATION_180 -> 180f
+            else -> 0f
+        }
+        screen.rotatingViews.forEach { it.animate().rotation(angle).setDuration(220).start() }
+    }
 
     private fun toast(message: String) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
+    private companion object {
+        const val TAG = "Click"
+        const val REQUEST_LAUNCH = 1001
+        const val REQUEST_MICROPHONE = 1002
+        const val REQUEST_ALBUM = 1003
+        const val REQUEST_STORAGE = 1004
     }
 }

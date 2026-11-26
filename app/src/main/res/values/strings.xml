@@ -1,15 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Click</string>
-
-    <!-- Top quick-control pills -->
-    <string name="cd_flash">Flash toggle</string>
-    <string name="cd_aspect">Aspect ratio toggle</string>
-    <string name="cd_pro">Pro / ISO drawer</string>
-    <string name="cd_resolution">Video resolution and frame rate</string>
-    <string name="cd_shutter">Shutter</string>
-    <string name="cd_flip_camera">Flip camera</string>
-    <string name="cd_last_media">Last media thumbnail</string>
-    <string name="cd_zoom">Zoom level</string>
-    <string name="cd_exposure_slider">Exposure compensation slider</string>
 </resources>

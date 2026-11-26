@@ -1,14 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!--
-        Fixed pitch-black dark theme. Pure black background, no Material
-        component dependencies, no action bar.
-    -->
+    <!-- Pitch-black theme with no action bar and no Material components. -->
     <style name="Theme.Click" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/click_black</item>
-        <item name="android:statusBarColor">@color/click_black</item>
-        <item name="android:navigationBarColor">@color/click_black</item>
-        <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>
 </resources>
