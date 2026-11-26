@@ -35,7 +35,7 @@
             strictly to the Activity lifecycle via CameraX bindToLifecycle(), so
             sensor + buffers release immediately when the app is minimized or closed.
         -->
-       <activity
+        <activity
             android:name=".MainActivity"
             android:exported="true"
             android:screenOrientation="portrait"
