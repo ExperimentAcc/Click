@@ -693,14 +693,22 @@ class MainActivity : Activity(), LifecycleOwner {
             }
             return
         }
+        val type = contentResolver.getType(uri)
+        val isVideo = type?.startsWith("video") == true || uri.toString().contains("/video/")
+        // getType() can return null; an untyped VIEW intent matches no app at all.
         val view = Intent(Intent.ACTION_VIEW)
-            .setDataAndType(uri, contentResolver.getType(uri))
+            .setDataAndType(uri, type ?: if (isVideo) "video/*" else "image/*")
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         try {
             startActivity(view)
         } catch (e: Exception) {
             Log.w(TAG, "No gallery app", e)
-            toast("No app can open this file")
+            if (isVideo) {
+                // No installed app handles this video, so play it in Click itself.
+                startActivity(Intent(this, PlayerActivity::class.java).setData(uri))
+            } else {
+                toast("No app can open this file")
+            }
         }
     }
 

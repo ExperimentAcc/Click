@@ -77,6 +77,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".PlayerActivity"
+            android:exported="false"
+            android:screenOrientation="sensor"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density" />
+
 
         <!--
             Strip library-injected background components so the final merged
