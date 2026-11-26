@@ -51,11 +51,15 @@ Requirements: **JDK 17**, Android Studio Koala+ (or Gradle 8.7).
 
 Or simply **File → Open** the project root in Android Studio and Run / Build.
 
-> **Signing:** `assembleRelease` emits an *unsigned* release APK
-> (`app-release-unsigned.apk`) — no keystore is bundled with the source. Sign it
-> before installing/publishing, e.g.:
-> `apksigner sign --ks release.jks --out app-release-signed.apk app-release-unsigned.apk`
-> (or add a `signingConfig` to `app/build.gradle.kts` pointing at your keystore).
+> **Signing:** the project ships a demo release keystore
+> (`app/keystore/click-release.jks`, alias `click`, password `click123`), wired in
+> via a `signingConfig` in `app/build.gradle.kts` — so `assembleRelease` produces a
+> **signed, directly installable** `app-release.apk` (R8-minified, ~1.1 MB).
+>
+> For a real release, generate your own keystore and replace the credentials in
+> `signingConfigs.create("release")` — never ship production keys or reuse these
+> demo credentials:
+> `keytool -genkeypair -keystore my-release.jks -alias myapp -keyalg RSA -keysize 2048 -validity 10000`
 
 ## CI — GitHub Actions
 

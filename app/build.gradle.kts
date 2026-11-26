@@ -15,8 +15,21 @@ android {
         versionName = "1.0.0"
     }
 
+    // Signing: the project ships a demo keystore so `assembleRelease` produces a
+    // directly installable APK out of the box. For a real release, generate your
+    // own keystore and replace these credentials — never ship production keys.
+    signingConfigs {
+        create("release") {
+            keyAlias = "click"
+            keyPassword = "click123"
+            storeFile = file("keystore/click-release.jks")
+            storePassword = "click123"
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig = signingConfigs.getByName("release")
             // Ultra-lightweight release build: R8 minification + resource shrinking.
             isMinifyEnabled = true
             isShrinkResources = true
