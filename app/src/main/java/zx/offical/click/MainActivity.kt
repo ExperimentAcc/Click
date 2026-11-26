@@ -19,11 +19,11 @@ import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
 import android.util.Range
-import android.view.FrameLayout
 import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewGroup
 import android.view.animation.DecelerateInterpolator
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
@@ -56,6 +56,9 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
 import androidx.core.content.ContextCompat
 import java.util.Locale
 import kotlin.math.abs
@@ -81,7 +84,15 @@ import zx.offical.click.util.Ui
  * - All media is saved straight to MediaStore (DCIM/Camera) so the Album picks
  *   it up instantly.
  */
-class MainActivity : android.app.Activity() {
+class MainActivity : android.app.Activity(), LifecycleOwner {
+
+    /**
+     * Click is a plain Activity (no Fragment, no AppCompat), so CameraX needs a
+     * manual LifecycleOwner: a LifecycleRegistry fed from the real Activity
+     * lifecycle events lets bindToLifecycle() and LiveData.observe() work.
+     */
+    private val lifecycleRegistry = LifecycleRegistry(this)
+    override val lifecycle: Lifecycle get() = lifecycleRegistry
 
     companion object {
         private const val TAG = "Click"
@@ -100,7 +111,7 @@ class MainActivity : android.app.Activity() {
 
     private lateinit var preview: Preview
     private lateinit var imageCapture: ImageCapture
-    private lateinit var videoCapture: VideoCapture
+    private lateinit var videoCapture: VideoCapture<Recorder>
     private lateinit var recorder: Recorder
 
     private var videoQuality: Quality = Quality.FHD
@@ -140,7 +151,7 @@ class MainActivity : android.app.Activity() {
 
             override fun onScale(detector: ScaleGestureDetector): Boolean {
                 val target = (startZoom * detector.scaleFactor)
-                    .coerceIn(zoomRange.first, zoomRange.second)
+                    .coerceIn(zoomRange.start, zoomRange.endInclusive)
                 cameraControl?.setZoomRatio(target)
                 currentZoom = target
                 updateZoomPills()
@@ -188,6 +199,7 @@ class MainActivity : android.app.Activity() {
     // --------------------------------------------------------------- Lifecycle
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
         setContentView(R.layout.activity_main)
 
@@ -203,15 +215,32 @@ class MainActivity : android.app.Activity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+    }
+
     override fun onResume() {
         super.onResume()
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_RESUME)
         // Re-establish the camera if permission was granted while the app was paused.
         if (!::cameraProvider.isInitialized && hasCameraPermission()) {
             initCamera()
         }
     }
 
+    override fun onPause() {
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
+        super.onPause()
+    }
+
+    override fun onStop() {
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+        super.onStop()
+    }
+
     override fun onDestroy() {
+        lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
         handler.removeCallbacksAndMessages(null)
         if (::cameraProvider.isInitialized) {
             cameraProvider.shutdown()
@@ -352,7 +381,7 @@ class MainActivity : android.app.Activity() {
             if (mode == MODE_VIDEO) listOf(preview, videoCapture)
             else listOf(preview, imageCapture)
 
-        try {
+        val camera = try {
             cameraProvider.bindToLifecycle(this, selector, *useCases.toTypedArray())
         } catch (e: Exception) {
             Log.e(TAG, "Camera binding failed", e)
@@ -362,11 +391,9 @@ class MainActivity : android.app.Activity() {
 
         preview.setSurfaceProvider(previewView.surfaceProvider)
 
-        // CameraX 1.3.x exposes camera info through getAvailableCameraInfos().
-        val available = cameraProvider.getAvailableCameraInfos()
-        cameraInfo = available.firstOrNull { it.lensFacing == lensFacing }
-            ?: available.firstOrNull()
-        cameraControl = cameraInfo?.cameraControl
+        // CameraX 1.3.x: CameraInfo/CameraControl come from the bound Camera.
+        cameraInfo = camera.cameraInfo
+        cameraControl = camera.cameraControl
 
         observeCameraStates()
         refreshHardwareInfo()
@@ -446,12 +473,12 @@ class MainActivity : android.app.Activity() {
     // ------------------------------------------------- Hardware capability probing
     @OptIn(ExperimentalCamera2Interop::class)
     private fun refreshHardwareInfo() {
-        val cam2 = cameraInfo?.let { Camera2CameraInfo.from(it) } ?: return
+        val info = cameraInfo ?: return
+        val cam2 = Camera2CameraInfo.from(info)
 
         // ISO range from the sensor characteristics (Camera2CameraInfo).
-        val isoRange =
-            cam2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
-        if (isoRange != null && isoRange.hasUpperBound()) {
+        val isoRange = cam2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+        if (isoRange != null) {
             isoMin = isoRange.lower
             isoMax = isoRange.upper
         } else {
@@ -463,12 +490,12 @@ class MainActivity : android.app.Activity() {
         }
 
         // Exposure compensation range from CameraInfo.exposureState.
-        val exposureState: ExposureState? = cameraInfo?.exposureState
+        val exposureState: ExposureState? = info.exposureState
         if (exposureState != null && exposureState.isExposureCompensationSupported) {
             val r = exposureState.exposureCompensationRange
             exposureRange = if (r != null) r.lower..r.upper else 0..0
             focusOverlay.exposureRange = exposureRange
-            if (exposureRange.isNotEmpty()) {
+            if (!exposureRange.isEmpty()) {
                 cameraControl?.setExposureCompensationIndex(
                     exposureState.exposureCompensationIndex
                 )
@@ -479,7 +506,7 @@ class MainActivity : android.app.Activity() {
         // supported AE frame-rate ranges (30 fps is always offered as a baseline).
         videoOptions.clear()
         val qualities = try {
-            QualitySelector.getSupportedQualities(cameraInfo)
+            QualitySelector.getSupportedQualities(info)
         } catch (e: Exception) {
             Log.w(TAG, "Supported qualities query failed", e)
             emptyList()
@@ -583,20 +610,20 @@ class MainActivity : android.app.Activity() {
         } else 0
         if (targetH <= 0) return
         val lp = previewView.layoutParams as FrameLayout.LayoutParams
-        ValueAnimator.ofInt(lp.height, targetH)
-            .setDuration(220)
-            .setInterpolator(DecelerateInterpolator())
-            .addUpdateListener { a ->
-                lp.height = a.animatedValue as Int
-                previewView.requestLayout()
-            }
-            .start()
+        val anim = ValueAnimator.ofInt(lp.height, targetH)
+        anim.duration = 220
+        anim.interpolator = DecelerateInterpolator()
+        anim.addUpdateListener { value ->
+            lp.height = value.animatedValue as Int
+            previewView.requestLayout()
+        }
+        anim.start()
     }
 
     // --------------------------------------------------------------- Zoom
     private fun setZoom(ratio: Float, view: View) {
         Ui.tick(view)
-        val target = ratio.coerceIn(zoomRange.first, zoomRange.second)
+        val target = ratio.coerceIn(zoomRange.start, zoomRange.endInclusive)
         cameraControl?.setZoomRatio(target)
         currentZoom = target
         updateZoomPills()
@@ -867,10 +894,12 @@ class MainActivity : android.app.Activity() {
     // -------------------------------------------------------------- Flip camera
     private fun flipCamera() {
         Ui.tick(flipBtn)
-        ObjectAnimator.ofFloat(flipBtn, "rotation", flipBtn.rotation, flipBtn.rotation + 180f)
-            .setDuration(280)
-            .setInterpolator(DecelerateInterpolator())
-            .start()
+        val flipAnim = ObjectAnimator.ofFloat(
+            flipBtn, "rotation", flipBtn.rotation, flipBtn.rotation + 180f
+        )
+        flipAnim.duration = 280
+        flipAnim.interpolator = DecelerateInterpolator()
+        flipAnim.start()
         lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK)
             CameraSelector.LENS_FACING_FRONT
         else
@@ -902,10 +931,10 @@ class MainActivity : android.app.Activity() {
     private fun openLastMedia() {
         val uri = lastMediaUri ?: return
         val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-            addFlags(Intent.FLAG_GRANT_READ_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         val type = try {
-            androidx.core.content.MediaStore.getType(contentResolver, uri)
+            contentResolver.getType(uri)
         } catch (e: Exception) {
             null
         }

@@ -26,7 +26,7 @@ object Ui {
 
     /** Soft confirmation haptic — used for shutter taps. */
     fun confirm(view: View) {
-        view.performHapticFeedback(HapticFeedbackConstants.CONFIRMATION)
+        view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
     }
 
     /** MediaStore-safe timestamp, e.g. 20261125_143022. */

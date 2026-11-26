@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Camera permission only. No background services, no receivers, no extra permissions. -->
     <uses-permission android:name="android.permission.CAMERA" />
@@ -50,6 +51,29 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+        <!--
+            Strip library-injected background components so the final merged
+            manifest has zero background processes:
+            - androidx.camera.core.impl.MetadataHolderService (ships disabled,
+              never started — CameraX works fine without it)
+            - androidx.startup.InitializationProvider (transitive via
+              androidx.core; initializes libraries at install time)
+            - androidx.profileinstaller.ProfileInstallReceiver (transitive via
+              androidx.core; installs baseline profiles at runtime)
+        -->
+        <service
+            android:name="androidx.camera.core.impl.MetadataHolderService"
+            tools:ignore="Instantiatable"
+            tools:node="remove" />
+
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            tools:node="remove" />
+
+        <receiver
+            android:name="androidx.profileinstaller.ProfileInstallReceiver"
+            tools:node="remove" />
 
     </application>
 

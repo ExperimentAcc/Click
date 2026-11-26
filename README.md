@@ -15,7 +15,7 @@ A fast, ultra-responsive, iPhone-inspired Android camera app written in **Kotlin
 | **Minimalist dark viewfinder** | Pitch-black `#000000` bars, `#FFD60A` accents, haptic feedback (`HapticFeedbackConstants`) on shutter taps and mode switches, instant black-out shutter flash with zero capture lag (`CAPTURE_MODE_MINIMIZE_LATENCY`). |
 | **Bottom gesture & mode scroller** | Horizontal swipe/tap PHOTO–VIDEO selector with a sliding indicator, classic iOS circular shutter (white ring for photo, red circle that morphs into a rounded square while recording), circular last-media thumbnail, smooth-rotating camera-flip button. |
 | **Top quick-control pill bar** | Flash toggle, Aspect Ratio toggle (4:3 / 16:9 / 1:1 via ViewPort cropping), Pro/ISO drawer toggle, dynamic Resolution/FPS badge in video mode. |
-| **Photo mode** | Rear/front switching, flash OFF/ON/AUTO (bright white screen-flash via `FLASH_MODE_SCREEN` for front selfies), aspect ratios 4:3 / 16:9 / 1:1. |
+| **Photo mode** | Rear/front switching, flash OFF/ON/AUTO (bright white screen-flash overlay for front selfies), aspect ratios 4:3 / 16:9 / 1:1. |
 | **Tap-to-focus + exposure slider** | Yellow iOS-style focus square with a vertical sun-icon exposure compensation slider (`CameraControl.setExposureCompensationIndex()`), fades out smoothly. |
 | **Video mode** | Hardware-probed resolution/FPS badge — resolutions via `QualitySelector.getSupportedQualities()`, frame rates via `CameraInfo.getSupportedFrameRateRanges()` — e.g. `FHD • 30`, one-tap switching via `Recorder` (`QualitySelector` + `VideoCapture.Builder.setTargetFrameRate(Range)`). |
 | **Live zoom pill** | 1x / 2x / 4x pills plus smooth pinch-to-zoom (`CameraControl.setZoomRatio()`) working in both photo and active video recording. |
@@ -26,10 +26,15 @@ A fast, ultra-responsive, iPhone-inspired Android camera app written in **Kotlin
 
 - **APK size:** `isMinifyEnabled = true` + `isShrinkResources = true` in the release
   build type; only lightweight AndroidX + CameraX dependencies, no heavy third-party
-  libraries → release APK in the 3–5 MB range.
+  libraries → release APK measures **~1.1 MB**, comfortably inside (under) the 3–5 MB
+  target.
 - **Zero background processes:** `AndroidManifest.xml` contains **no `<service>` and no
-  `<receiver>`**. The camera is bound strictly to the Activity lifecycle
-  (`bindToLifecycle`), so the sensor and buffers release immediately on minimize/close.
+  `<receiver>`** — and the merged manifest stays clean too: library-injected
+  background components (CameraX's disabled `MetadataHolderService`, the
+  `androidx.startup` provider and `profileinstaller` receiver pulled in transitively
+  by `androidx.core`) are stripped at merge time with `tools:node="remove"`. The camera
+  is bound strictly to the Activity lifecycle (`bindToLifecycle`), so the sensor and
+  buffers release immediately on minimize/close.
 - **Default camera:** `IMAGE_CAPTURE` and `VIDEO_CAPTURE` intent filters make Click a
   standard, user-installable default camera app (no root). Set it via
   *Settings → Apps → Default apps → Camera app → Click*.
@@ -45,6 +50,25 @@ Requirements: **JDK 17**, Android Studio Koala+ (or Gradle 8.7).
 ```
 
 Or simply **File → Open** the project root in Android Studio and Run / Build.
+
+> **Signing:** `assembleRelease` emits an *unsigned* release APK
+> (`app-release-unsigned.apk`) — no keystore is bundled with the source. Sign it
+> before installing/publishing, e.g.:
+> `apksigner sign --ks release.jks --out app-release-signed.apk app-release-unsigned.apk`
+> (or add a `signingConfig` to `app/build.gradle.kts` pointing at your keystore).
+
+## CI — GitHub Actions
+
+`.github/workflows/build-apk.yml` builds the release APK on every push/PR to
+`main` (plus manual `workflow_dispatch` runs) and uploads it as a workflow
+artifact named **`click-release-apk`** (14-day retention).
+
+- JDK 17 (Temurin) with Gradle cache
+- Android SDK via `android-actions/setup-android`
+- `./gradlew :app:assembleRelease` (R8 minify + resource shrink on)
+- Artifact: `app/build/outputs/apk/release/*.apk`
+
+Find the artifact under the run's **Artifacts** tab after the workflow completes.
 
 ## Project structure
 

@@ -25,5 +25,5 @@
         android:contentDescription="@string/cd_shutter"
         android:gravity="center"
         android:src="@drawable/ic_shutter_photo"
-        android:alpha="0f" />
+        android:alpha="0.0" />
 </FrameLayout>
